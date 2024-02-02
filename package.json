@@ -12,6 +12,7 @@
         "test": "vitest"
     },
     "dependencies": {
+        "@deepgram/sdk": "^3.1.6",
         "@heroicons/react": "^2.0.15",
         "@material-tailwind/react": "^2.1.8",
         "axios": "^1.6.7",
