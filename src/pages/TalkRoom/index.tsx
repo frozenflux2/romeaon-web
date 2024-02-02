@@ -1,13 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import IdleVideo from '@assets/talkroom/idle.mp4'
-import { IconButton } from '@material-tailwind/react'
+import { Button, IconButton } from '@material-tailwind/react'
 import {
     PlayIcon,
     ChatBubbleOvalLeftIcon,
     DocumentTextIcon,
     ChevronDoubleRightIcon,
+    XMarkIcon,
+    PhotoIcon,
+    PaperAirplaneIcon,
 } from '@heroicons/react/20/solid'
 import { fetchWithRetries, postRequest } from '@/api'
 import useSize from '@/hooks/useSize'
@@ -25,6 +28,7 @@ import {
 } from '@/constants'
 import { ROLE, getOpenAIChatCompletion, type messageType } from '@/utils/openai'
 import toast from 'react-hot-toast'
+import ChatBox from './Components/Chatbox'
 
 const TalkRoom = () => {
     const navigate = useNavigate()
@@ -32,6 +36,9 @@ const TalkRoom = () => {
 
     const [showCaption, setShowCaption] = useState(false)
     const [openDrawer, setOpenDrawer] = useState(false)
+    const [image, setImage] = useState<string | ArrayBuffer | null>(null)
+    const [userInput, setUserInput] = useState('')
+    const endOfMessagesRef = useRef<HTMLDivElement>(null)
 
     const [isPlaying, setIsPlaying] = useState(false)
     const talkVideoRef = useRef<HTMLVideoElement | null>(null)
@@ -57,6 +64,118 @@ const TalkRoom = () => {
             content: SYSTEM_PROMPT,
         },
     ])
+
+    const fileInputRef = useRef<HTMLInputElement>(null)
+
+    const handleButtonClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+        e.stopPropagation()
+        if (fileInputRef.current) {
+            fileInputRef.current.value = ''
+        }
+        fileInputRef.current?.click()
+    }
+
+    const handleSendMessage = async () => {
+        if (
+            peerConnectionRef.current?.signalingState === 'stable' ||
+            peerConnectionRef.current?.iceConnectionState === 'connected'
+        ) {
+            if (image) {
+                let _messages = [
+                    ...messages,
+                    {
+                        role: ROLE.USER,
+                        content: [
+                            {
+                                type: 'text',
+                                text:
+                                    userInput ||
+                                    `Tell me about the wine in this image`,
+                            },
+                            {
+                                type: 'image_url',
+                                image_url: {
+                                    url: image,
+                                },
+                            },
+                        ],
+                    },
+                ]
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        role: ROLE.USER,
+                        content: [
+                            {
+                                type: 'text',
+                                text:
+                                    userInput ||
+                                    `Tell me about the wine in this image`,
+                            },
+                            {
+                                type: 'image_url',
+                                image_url: {
+                                    url: image,
+                                },
+                            },
+                        ],
+                    },
+                ])
+                const openAIResponse = await getOpenAIChatCompletion(
+                    _messages,
+                    'gpt-4-vision-preview'
+                )
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        role: ROLE.ASSISTANT,
+                        content: openAIResponse,
+                    },
+                ])
+                processTalk(openAIResponse)
+            } else {
+                let _messages = [
+                    ...messages,
+                    {
+                        role: ROLE.USER,
+                        content: userInput,
+                    },
+                ]
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        role: ROLE.USER,
+                        content: userInput,
+                    },
+                ])
+                const openAIResponse = await getOpenAIChatCompletion(_messages)
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        role: ROLE.ASSISTANT,
+                        content: openAIResponse,
+                    },
+                ])
+                processTalk(openAIResponse)
+            }
+            setUserInput('')
+            setImage(null)
+        } else {
+            toast.error('Please connect to service first!')
+        }
+    }
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            const file = e.target.files[0]
+            const reader = new FileReader()
+            reader.onloadend = () => {
+                const base64String = reader.result
+                setImage(base64String)
+            }
+            reader.readAsDataURL(file)
+        }
+    }
 
     const handleConnection = async () => {
         if (isPlaying) {
@@ -537,6 +656,12 @@ const TalkRoom = () => {
     }, [navigate])
     */
 
+    useEffect(() => {
+        if (endOfMessagesRef.current) {
+            endOfMessagesRef.current.scrollIntoView({ behavior: 'smooth' })
+        }
+    }, [messages])
+
     return (
         <div className="h-[calc(100vh-55px)] bg-publicDashboardBg relative">
             <video
@@ -560,7 +685,7 @@ const TalkRoom = () => {
             <div
                 className={`${
                     openDrawer ? 'opacity-100' : 'opacity-0'
-                } absolute bg-white/40 w-[300px] transition-[right, opacity] duration-300 ease-in-out z-[4]`}
+                } absolute bg-white/40 w-[300px] transition-[right, opacity] duration-300 ease-in-out z-[4] backdrop-blur-md`}
                 style={{
                     height: `${
                         windowSize[0] > 720
@@ -604,21 +729,82 @@ const TalkRoom = () => {
                     }px`,
                 }}
             >
-                <div className="flex items-center justify-between h-16 px-2">
-                    <IconButton
-                        onClick={() => setOpenDrawer(false)}
-                        className="w-8 h-8 rounded rounded-full"
-                        variant="text"
-                    >
-                        <ChevronDoubleRightIcon
-                            color="black"
-                            className="w-4 h-4 md:w-6 md:h-6"
+                <div className="h-full overflow-hidden">
+                    <div className="flex items-center justify-between h-16 px-2">
+                        <IconButton
+                            onClick={() => setOpenDrawer(false)}
+                            className="w-8 h-8 rounded rounded-full"
+                            variant="text"
+                        >
+                            <ChevronDoubleRightIcon
+                                color="black"
+                                className="w-4 h-4 md:w-6 md:h-6"
+                            />
+                        </IconButton>
+                    </div>
+                    <div className="h-[calc(100%-200px)] rounded mx-2 overflow-y-auto relative">
+                        {messages.map((msg, key) => (
+                            <ChatBox key={`chat-${key}`} {...msg} />
+                        ))}
+                        {openDrawer && <div ref={endOfMessagesRef} />}
+                    </div>
+                    <div className="relative flex flex-col gap-0 px-2 py-3 h-30">
+                        {image && (
+                            <div className="absolute top-0 -translate-y-[100%]">
+                                <div className="relative items-center">
+                                    <img
+                                        src={image}
+                                        alt="Selected"
+                                        className="bottom-0 w-20"
+                                    />
+                                    <button
+                                        onClick={() => setImage('')}
+                                        className="absolute p-1 rounded-full -top-2 -right-2 bg-black/90"
+                                    >
+                                        <XMarkIcon
+                                            className="w-4"
+                                            color="white"
+                                        />
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                        <textarea
+                            value={userInput}
+                            onChange={(e) => setUserInput(e.target.value)}
+                            onKeyDown={(
+                                event: React.KeyboardEvent<HTMLTextAreaElement>
+                            ) => {
+                                if (event.key === 'Enter' && !event.shiftKey) {
+                                    event.preventDefault()
+                                    handleSendMessage()
+                                }
+                            }}
+                            rows={3}
+                            placeholder="Type your message here..."
+                            className="w-full p-2 text-sm text-white border-b-0 border-white rounded rounded-b-none outline-none resize-none bg-white/0 focus:border-white focus:overflow-hidden focus:ring-0"
                         />
-                    </IconButton>
-                </div>
-                <div className="h-[calc(100%-64px)] border border-black mx-2 relative flex flex-col">
-                    <div></div>
-                    <div></div>
+                        <div className="flex items-center justify-between p-2 border border-t-0 rounded-b">
+                            <IconButton
+                                className="w-6 h-6 rounded-full bg-black/60"
+                                onClick={handleButtonClick}
+                            >
+                                <PhotoIcon className="w-3 h-3" />
+                                <input
+                                    type="file"
+                                    className="hidden"
+                                    ref={fileInputRef}
+                                    onChange={handleFileChange}
+                                />
+                            </IconButton>
+                            <IconButton
+                                className="w-6 h-6 rounded rounded-full bg-black/60"
+                                onClick={handleSendMessage}
+                            >
+                                <PaperAirplaneIcon className="w-3 h-3" />
+                            </IconButton>
+                        </div>
+                    </div>
                 </div>
             </div>
 

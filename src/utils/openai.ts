@@ -11,7 +11,10 @@ export type messageType = {
     content: any
 }
 
-export const getOpenAIChatCompletion = async (messages: messageType[]) => {
+export const getOpenAIChatCompletion = async (
+    messages: messageType[],
+    model = OPENAI_MODEL
+) => {
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -19,8 +22,23 @@ export const getOpenAIChatCompletion = async (messages: messageType[]) => {
             'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-            model: OPENAI_MODEL,
-            messages: messages,
+            model: model,
+            messages: messages.map((message, index, array) => {
+                // If it's not the last item and the content is an array, we filter out image_url
+                if (
+                    index !== array.length - 1 &&
+                    Array.isArray(message.content)
+                ) {
+                    const _content = message.content.filter(
+                        (contentItem) => contentItem.type !== 'image_url'
+                    )
+                    return {
+                        ...message,
+                        content: _content,
+                    }
+                }
+                return message
+            }),
             temperature: 0.7,
             max_tokens: 100,
         }),
