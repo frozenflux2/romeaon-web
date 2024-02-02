@@ -2,7 +2,6 @@ import { Avatar } from '@material-tailwind/react'
 import { ROLE, type messageType } from '@/utils/openai'
 
 const ChatBox = ({ role, content }: messageType) => {
-    console.log('content: ', content)
     if (role === ROLE.USER) {
         return (
             <div className="flex items-end gap-3 p-4">
