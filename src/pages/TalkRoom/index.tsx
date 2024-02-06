@@ -1,10 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import IdleVideo from '@assets/talkroom/idle.mp4'
-import { Button, IconButton } from '@material-tailwind/react'
+import { Button, IconButton, Spinner } from '@material-tailwind/react'
 import {
-    PlayIcon,
+    MicrophoneIcon,
     ChatBubbleOvalLeftIcon,
     DocumentTextIcon,
     ChevronDoubleRightIcon,
@@ -12,15 +12,17 @@ import {
     PhotoIcon,
     PaperAirplaneIcon,
 } from '@heroicons/react/20/solid'
-import { fetchWithRetries, postRequest } from '@/api'
+import { fetchWithRetries } from '@/api'
 import useSize from '@/hooks/useSize'
 import {
     LiveClient,
     LiveConnectionState,
     LiveTranscriptionEvent,
+    LiveTranscriptionEvents,
+    createClient,
 } from '@deepgram/sdk'
-import { getDeepgramLiveConnection } from '@/utils/deepgram'
 import {
+    DEEPGRAM_API_KEY,
     D_ID_API_KEY,
     D_ID_ENDPOINT,
     D_ID_SOURCE_IMG,
@@ -34,9 +36,16 @@ const TalkRoom = () => {
     const navigate = useNavigate()
     const windowSize = useSize()
 
+    const [connection, setConnection] = useState<LiveClient | null>()
+    const [speechChunk, setSpeechChunk] = useState('')
+    const [microphone, setMicrophone] = useState<MediaRecorder | null>()
+    const [userMedia, setUserMedia] = useState<MediaStream | null>()
+    const [micOpen, setMicOpen] = useState(false)
+    const [isListening, setListening] = useState(false)
+
     const [showCaption, setShowCaption] = useState(false)
     const [openDrawer, setOpenDrawer] = useState(false)
-    const [image, setImage] = useState<string | ArrayBuffer | null>(null)
+    const [image, setImage] = useState<string | null>(null)
     const [userInput, setUserInput] = useState('')
     const endOfMessagesRef = useRef<HTMLDivElement>(null)
 
@@ -53,10 +62,6 @@ const TalkRoom = () => {
     const sessionClientAnswerRef = useRef<RTCSessionDescriptionInit | null>(
         null
     )
-
-    const deepgramLive = useRef<LiveClient | null>(null)
-    const speechChunk = useRef('')
-    const mediaRecorder = useRef<MediaRecorder | null>(null)
 
     const [messages, setMessages] = useState<messageType[]>([
         {
@@ -170,83 +175,10 @@ const TalkRoom = () => {
             const file = e.target.files[0]
             const reader = new FileReader()
             reader.onloadend = () => {
-                const base64String = reader.result
+                const base64String = reader.result as string
                 setImage(base64String)
             }
             reader.readAsDataURL(file)
-        }
-    }
-
-    const handleConnection = async () => {
-        if (isPlaying) {
-            stopAllStreams()
-            closePC()
-            console.log('close deepgram cuz of stop playing')
-            closeDeepgram()
-            stopRecorder()
-        } else {
-            setIsPlaying(true)
-            idleVideoRef.current && idleVideoRef.current.play()
-
-            // deepgram connection
-            deepgramLive.current = getDeepgramLiveConnection(
-                transcriptReceivedEventHandler
-            )
-
-            // d-id connection
-            setDIDStreamConnection()
-
-            // start recorder
-            navigator.mediaDevices
-                .getUserMedia({ audio: true })
-                .then(async (stream) => {
-                    if (!MediaRecorder.isTypeSupported('audio/webm')) {
-                        toast(
-                            'iOS / Safari Browser not supported. Please use Chrome or Firefox on Desktop or use Android.'
-                        )
-                        return
-                    }
-
-                    mediaRecorder.current = new MediaRecorder(stream, {
-                        mimeType: 'audio/webm',
-                    })
-                    mediaRecorder.current.start(250)
-                    mediaRecorder.current.addEventListener(
-                        'dataavailable',
-                        async (event) => {
-                            if (
-                                event.data.size > 0 &&
-                                deepgramLive.current?.getReadyState() ===
-                                    LiveConnectionState.OPEN
-                            )
-                                deepgramLive.current.send(event.data)
-                        }
-                    )
-                })
-                .catch((err) => {
-                    console.log('error on media recorder: ', err)
-                    toast.error(
-                        "Can't find Media device or Permission denied!!"
-                    )
-                    stopRecorder()
-                    closeDeepgram()
-                    console.log('close deepgram cuz of no mic')
-                })
-        }
-    }
-
-    const closeDeepgram = () => {
-        if (deepgramLive.current) {
-            deepgramLive.current.removeAllListeners()
-            deepgramLive.current.finish()
-            deepgramLive.current = null
-        }
-    }
-
-    const stopRecorder = () => {
-        if (mediaRecorder.current) {
-            mediaRecorder.current.stop()
-            mediaRecorder.current = null
         }
     }
 
@@ -284,9 +216,6 @@ const TalkRoom = () => {
             console.log('error during streaming setup', e)
             stopAllStreams()
             closePC()
-            console.log('close deepgram cuz of streaming setup failed')
-            closeDeepgram()
-            stopRecorder()
             return
         }
 
@@ -339,20 +268,17 @@ const TalkRoom = () => {
         ) {
             stopAllStreams()
             closePC()
-            console.log('close deepgram cuz of peerconnection failed or closed')
-            closeDeepgram()
-            stopRecorder()
         }
     }
 
     const onConnectionStateChange = () => {
         console.log(peerConnectionRef.current?.connectionState)
-        toast(`Connection State: ${peerConnectionRef.current?.connectionState}`)
+        // toast(`Connection State: ${peerConnectionRef.current?.connectionState}`)
     }
 
     const onSignalingStateChange = () => {
         console.log(peerConnectionRef.current?.signalingState)
-        toast(`Sigaling State: ${peerConnectionRef.current?.signalingState}`)
+        // toast(`Sigaling State: ${peerConnectionRef.current?.signalingState}`)
     }
 
     const onTrack = (event: RTCTrackEvent) => {
@@ -517,85 +443,6 @@ const TalkRoom = () => {
         }
     }
 
-    const transcriptReceivedEventHandler = async (
-        dgOutput: LiveTranscriptionEvent
-    ) => {
-        let dgJSON = dgOutput
-        let words: {
-            word: string
-            start: number
-            end: number
-            confidence: number
-            punctuated_word: string
-        }[] = []
-        if (dgJSON.channel) {
-            let utterance
-            try {
-                utterance = dgJSON.channel.alternatives[0].transcript
-                words = words.concat(dgJSON.channel.alternatives[0].words)
-            } catch (error) {
-                console.log(
-                    '[WARNING] parsing dgJSON failed. Response from dgLive is:',
-                    error
-                )
-                console.log(dgJSON)
-            }
-            if (utterance) {
-                if (!speechChunk.current) {
-                    speechChunk.current = ''
-                }
-                if (dgJSON.speech_final) {
-                    speechChunk.current += utterance + ' '
-                    console.log(`[DEBUG] SPEECH_FINAL ${speechChunk}`)
-                    // fetch openai response
-                    let _messages = [
-                        ...messages,
-                        {
-                            role: ROLE.USER,
-                            content: speechChunk.current,
-                        },
-                    ]
-                    setMessages((prev) => [
-                        ...prev,
-                        {
-                            role: ROLE.USER,
-                            content: speechChunk.current,
-                        },
-                    ])
-                    const openAIResponse = await getOpenAIChatCompletion(
-                        _messages
-                    )
-                    setMessages((prev) => [
-                        ...prev,
-                        {
-                            role: ROLE.ASSISTANT,
-                            content: openAIResponse,
-                        },
-                    ])
-                    processTalk(openAIResponse)
-                    speechChunk.current = ''
-                    words = []
-                } else if (dgJSON.is_final) {
-                    speechChunk.current += utterance + ' '
-                    console.log(`[DEBUG] IS_FINAL: ${speechChunk}`)
-                } else {
-                    console.log(`[DEBUG] INTERIM_RESULT: `, utterance)
-                }
-            }
-        } else {
-            if (speechChunk.current != '') {
-                console.log(
-                    `[DEBUG] UTTERANCE_END_MS Triggered: ${speechChunk}`
-                )
-                speechChunk.current = ''
-            } else {
-                console.log(
-                    `[DEBUG] UTTERANCE_END_MS Not Triggered: ${speechChunk}`
-                )
-            }
-        }
-    }
-
     const processTalk = async (msg: string) => {
         if (
             peerConnectionRef.current?.signalingState === 'stable' ||
@@ -656,14 +503,141 @@ const TalkRoom = () => {
     }, [navigate])
     */
 
+    const toggleMicrophone = useCallback(async () => {
+        if (microphone && userMedia) {
+            setUserMedia(null)
+            setMicrophone(null)
+
+            microphone.stop()
+            if (speechChunk) {
+                console.log('voice message: ', speechChunk)
+                let _messages = [
+                    ...messages,
+                    {
+                        role: ROLE.USER,
+                        content: speechChunk,
+                    },
+                ]
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        role: ROLE.USER,
+                        content: speechChunk,
+                    },
+                ])
+                const openAIResponse = await getOpenAIChatCompletion(_messages)
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        role: ROLE.ASSISTANT,
+                        content: openAIResponse,
+                    },
+                ])
+                processTalk(openAIResponse)
+            }
+        } else {
+            setSpeechChunk('')
+            const userMedia = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+            })
+
+            const microphone = new MediaRecorder(userMedia)
+            microphone.start(500)
+
+            microphone.onstart = () => {
+                setMicOpen(true)
+            }
+
+            microphone.onstop = () => {
+                setMicOpen(false)
+            }
+
+            microphone.ondataavailable = (e) => {
+                if (e.data.size > 0) connection?.send(e.data)
+            }
+
+            setUserMedia(userMedia)
+            setMicrophone(microphone)
+        }
+    }, [connection, microphone, userMedia])
+
+    const setupDeepgram = () => {
+        const deepgram = createClient(DEEPGRAM_API_KEY)
+        const connection = deepgram.listen.live({
+            model: 'nova',
+            interim_results: true,
+            smart_format: true,
+        })
+
+        connection.on(LiveTranscriptionEvents.Open, () => {
+            console.log('connection established')
+            setListening(true)
+        })
+
+        connection.on(LiveTranscriptionEvents.Close, (e) => {
+            console.log(`connection closed: ${Object.keys(e)}`)
+            setListening(false)
+            setConnection(null)
+        })
+
+        connection.on(LiveTranscriptionEvents.Transcript, (data) => {
+            const words = data.channel.alternatives[0].words
+            const caption = words
+                .map((word: any) => word.punctuated_word ?? word.word)
+                .join(' ')
+            if (caption !== '') {
+                setSpeechChunk((prev) => prev + caption)
+            }
+        })
+
+        setConnection(connection)
+        // setLoading(false);
+    }
+
+    useEffect(() => {
+        if (!connection) {
+            setupDeepgram()
+            return
+        }
+        const intervalId = setInterval(() => connection.keepAlive(), 3000)
+        return () => clearInterval(intervalId)
+    }, [connection])
+
     useEffect(() => {
         if (endOfMessagesRef.current) {
             endOfMessagesRef.current.scrollIntoView({ behavior: 'smooth' })
         }
     }, [messages])
 
+    useEffect(() => {
+        setupDeepgram()
+        setDIDStreamConnection()
+    }, [])
+
+    useEffect(() => {
+        if (
+            peerConnectionRef.current?.signalingState === 'stable' ||
+            peerConnectionRef.current?.iceConnectionState === 'connected'
+        )
+            setIsPlaying(true)
+        else setIsPlaying(false)
+    }, [peerConnectionRef.current])
+
     return (
         <div className="h-[calc(100vh-55px)] bg-publicDashboardBg relative">
+            <div className="absolute flex flex-col gap-1 p-2 rounded-md top-2 left-2 bg-gray-500/30 z-[5] backdrop-blur-md">
+                <div>
+                    Deepgram: {isListening ? 'Connected' : 'Disconnected'}
+                </div>
+                <div>
+                    D-ID:{' '}
+                    {peerConnectionRef.current?.signalingState === 'stable' ||
+                    peerConnectionRef.current?.iceConnectionState ===
+                        'connected'
+                        ? 'Connected'
+                        : 'Disconnected'}
+                </div>
+            </div>
             <video
                 id="talk-video"
                 loop
@@ -676,8 +650,9 @@ const TalkRoom = () => {
                 id="idle-video"
                 src={IdleVideo}
                 loop
-                autoPlay={isPlaying}
+                autoPlay
                 playsInline
+                muted
                 className={`absolute w-full h-full transition-opacity duration-300 ease-in-out opacity-100`}
                 ref={idleVideoRef}
             />
@@ -809,7 +784,7 @@ const TalkRoom = () => {
             </div>
 
             <div
-                className="absolute flex items-center justify-center w-full gap-4 md:gap-10 z-[3]"
+                className="absolute flex items-center justify-center w-full gap-4 md:gap-10"
                 style={{
                     bottom: `${
                         windowSize[0] > 720
@@ -822,11 +797,16 @@ const TalkRoom = () => {
             >
                 <IconButton
                     className={`rounded-full w-8 h-8 md:w-10 md:h-10 ${
-                        isPlaying ? 'bg-[#A8184C]' : 'bg-white/10'
+                        !!userMedia && !!microphone && micOpen
+                            ? 'bg-[#A8184C]'
+                            : 'bg-white/10'
                     } hover:brightness-125`}
-                    onClick={handleConnection}
+                    onClick={() => toggleMicrophone()}
                 >
-                    <PlayIcon color="white" className="w-4 h-4 md:w-6 md:h-6" />
+                    <MicrophoneIcon
+                        color="white"
+                        className="w-4 h-4 md:w-6 md:h-6"
+                    />
                 </IconButton>
                 <IconButton
                     className={`rounded-full ${
@@ -850,6 +830,12 @@ const TalkRoom = () => {
                     />
                 </IconButton>
             </div>
+
+            {!isPlaying && (
+                <div className="flex items-center justify-center w-full h-full backdrop-blur-sm z-[5]">
+                    <Spinner className="z-[6] mx-auto w-16 h-16" />
+                </div>
+            )}
         </div>
     )
 }
