@@ -11,6 +11,7 @@ import {
     XMarkIcon,
     PhotoIcon,
     PaperAirplaneIcon,
+    PlayIcon,
 } from '@heroicons/react/20/solid'
 import { fetchWithRetries } from '@/api'
 import useSize from '@/hooks/useSize'
@@ -33,11 +34,11 @@ import toast from 'react-hot-toast'
 import ChatBox from './Components/Chatbox'
 
 const TalkRoom = () => {
-    const navigate = useNavigate()
     const windowSize = useSize()
 
     const [connection, setConnection] = useState<LiveClient | null>()
-    const [speechChunk, setSpeechChunk] = useState('')
+    // const [speechChunk, setSpeechChunk] = useState('')
+    const speechChunkRef = useRef<string | null>('')
     const [microphone, setMicrophone] = useState<MediaRecorder | null>()
     const [userMedia, setUserMedia] = useState<MediaStream | null>()
     const [micOpen, setMicOpen] = useState(false)
@@ -268,6 +269,14 @@ const TalkRoom = () => {
         ) {
             stopAllStreams()
             closePC()
+            return
+        }
+        if (
+            peerConnectionRef.current?.signalingState === 'stable' ||
+            peerConnectionRef.current?.iceConnectionState === 'connected'
+        ) {
+            setIsPlaying(true)
+            return
         }
     }
 
@@ -277,8 +286,25 @@ const TalkRoom = () => {
     }
 
     const onSignalingStateChange = () => {
-        console.log(peerConnectionRef.current?.signalingState)
-        // toast(`Sigaling State: ${peerConnectionRef.current?.signalingState}`)
+        console.log(
+            'signalingState:',
+            peerConnectionRef.current?.signalingState
+        )
+        if (
+            peerConnectionRef.current?.iceConnectionState === 'failed' ||
+            peerConnectionRef.current?.iceConnectionState === 'closed'
+        ) {
+            stopAllStreams()
+            closePC()
+            return
+        }
+        if (
+            peerConnectionRef.current?.signalingState === 'stable' ||
+            peerConnectionRef.current?.iceConnectionState === 'connected'
+        ) {
+            setIsPlaying(true)
+            return
+        }
     }
 
     const onTrack = (event: RTCTrackEvent) => {
@@ -505,24 +531,26 @@ const TalkRoom = () => {
 
     const toggleMicrophone = useCallback(async () => {
         if (microphone && userMedia) {
+            userMedia.getTracks().forEach((track) => track.stop())
+            microphone.stop()
+
             setUserMedia(null)
             setMicrophone(null)
 
-            microphone.stop()
-            if (speechChunk) {
-                console.log('voice message: ', speechChunk)
+            console.log('voice message: ', speechChunkRef.current)
+            if (speechChunkRef.current) {
                 let _messages = [
                     ...messages,
                     {
                         role: ROLE.USER,
-                        content: speechChunk,
+                        content: speechChunkRef.current,
                     },
                 ]
                 setMessages((prev) => [
                     ...prev,
                     {
                         role: ROLE.USER,
-                        content: speechChunk,
+                        content: speechChunkRef.current,
                     },
                 ])
                 const openAIResponse = await getOpenAIChatCompletion(_messages)
@@ -536,13 +564,13 @@ const TalkRoom = () => {
                 processTalk(openAIResponse)
             }
         } else {
-            setSpeechChunk('')
+            speechChunkRef.current = ''
             const userMedia = await navigator.mediaDevices.getUserMedia({
                 audio: true,
             })
 
             const microphone = new MediaRecorder(userMedia)
-            microphone.start(500)
+            microphone.start()
 
             microphone.onstart = () => {
                 setMicOpen(true)
@@ -561,47 +589,47 @@ const TalkRoom = () => {
         }
     }, [connection, microphone, userMedia])
 
-    const setupDeepgram = () => {
+    const setupDeepgram = useCallback(() => {
+        console.log('connecting to deepgram')
         const deepgram = createClient(DEEPGRAM_API_KEY)
-        const connection = deepgram.listen.live({
+        const deepgramLive = deepgram.listen.live({
             model: 'nova',
             interim_results: true,
             smart_format: true,
         })
 
-        connection.on(LiveTranscriptionEvents.Open, () => {
+        deepgramLive.on(LiveTranscriptionEvents.Open, () => {
             console.log('connection established')
             setListening(true)
+            setInterval(() => deepgramLive.keepAlive(), 3000)
         })
 
-        connection.on(LiveTranscriptionEvents.Close, (e) => {
+        deepgramLive.on(LiveTranscriptionEvents.Close, (e) => {
             console.log(`connection closed: ${Object.keys(e)}`)
             setListening(false)
             setConnection(null)
         })
 
-        connection.on(LiveTranscriptionEvents.Transcript, (data) => {
+        deepgramLive.on(LiveTranscriptionEvents.Transcript, (data) => {
             const words = data.channel.alternatives[0].words
             const caption = words
                 .map((word: any) => word.punctuated_word ?? word.word)
                 .join(' ')
+            console.log('caption: ', caption)
             if (caption !== '') {
-                setSpeechChunk((prev) => prev + caption)
+                speechChunkRef.current += caption
             }
         })
 
-        setConnection(connection)
+        setConnection(deepgramLive)
         // setLoading(false);
-    }
-
-    useEffect(() => {
-        if (!connection) {
-            setupDeepgram()
-            return
-        }
-        const intervalId = setInterval(() => connection.keepAlive(), 3000)
-        return () => clearInterval(intervalId)
     }, [connection])
+
+    // useEffect(() => {
+    //     if (!connection) return
+    //     const intervalId = setInterval(() => connection.keepAlive(), 3000)
+    //     return () => clearInterval(intervalId)
+    // }, [connection])
 
     useEffect(() => {
         if (endOfMessagesRef.current) {
@@ -610,18 +638,9 @@ const TalkRoom = () => {
     }, [messages])
 
     useEffect(() => {
+        if (connection) return
         setupDeepgram()
-        setDIDStreamConnection()
     }, [])
-
-    useEffect(() => {
-        if (
-            peerConnectionRef.current?.signalingState === 'stable' ||
-            peerConnectionRef.current?.iceConnectionState === 'connected'
-        )
-            setIsPlaying(true)
-        else setIsPlaying(false)
-    }, [peerConnectionRef.current])
 
     return (
         <div className="h-[calc(100vh-55px)] bg-publicDashboardBg relative">
@@ -629,14 +648,7 @@ const TalkRoom = () => {
                 <div>
                     Deepgram: {isListening ? 'Connected' : 'Disconnected'}
                 </div>
-                <div>
-                    D-ID:{' '}
-                    {peerConnectionRef.current?.signalingState === 'stable' ||
-                    peerConnectionRef.current?.iceConnectionState ===
-                        'connected'
-                        ? 'Connected'
-                        : 'Disconnected'}
-                </div>
+                <div>D-ID: {isPlaying ? 'Connected' : 'Disconnected'}</div>
             </div>
             <video
                 id="talk-video"
@@ -833,7 +845,17 @@ const TalkRoom = () => {
 
             {!isPlaying && (
                 <div className="flex items-center justify-center w-full h-full backdrop-blur-sm z-[5]">
-                    <Spinner className="z-[6] mx-auto w-16 h-16" />
+                    <IconButton
+                        className={`rounded-full w-8 h-8 md:w-10 md:h-10 bg-[#A8184C] hover:brightness-125`}
+                        onClick={() => {
+                            setDIDStreamConnection()
+                        }}
+                    >
+                        <PlayIcon
+                            color="white"
+                            className="w-4 h-4 md:w-6 md:h-6"
+                        />
+                    </IconButton>
                 </div>
             )}
         </div>
