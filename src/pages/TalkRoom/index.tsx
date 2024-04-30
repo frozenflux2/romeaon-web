@@ -16,14 +16,6 @@ import {
 import { fetchWithRetries } from '@/api'
 import useSize from '@/hooks/useSize'
 import {
-    LiveClient,
-    LiveConnectionState,
-    LiveTranscriptionEvent,
-    LiveTranscriptionEvents,
-    createClient,
-} from '@deepgram/sdk'
-import {
-    DEEPGRAM_API_KEY,
     D_ID_API_KEY,
     D_ID_ENDPOINT,
     D_ID_SOURCE_IMG,
@@ -31,18 +23,14 @@ import {
 } from '@/constants'
 import { ROLE, getOpenAIChatCompletion, type messageType } from '@/utils/openai'
 import toast from 'react-hot-toast'
+import { useAudioRecorder } from 'react-audio-voice-recorder'
 import ChatBox from './Components/Chatbox'
+import { transcriptAudio } from '@/utils/whisper'
 
 const TalkRoom = () => {
     const windowSize = useSize()
 
-    const [connection, setConnection] = useState<LiveClient | null>()
-    // const [speechChunk, setSpeechChunk] = useState('')
     const speechChunkRef = useRef<string | null>('')
-    const [microphone, setMicrophone] = useState<MediaRecorder | null>()
-    const [userMedia, setUserMedia] = useState<MediaStream | null>()
-    const [micOpen, setMicOpen] = useState(false)
-    const [isListening, setListening] = useState(false)
 
     const [showCaption, setShowCaption] = useState(false)
     const [openDrawer, setOpenDrawer] = useState(false)
@@ -70,6 +58,17 @@ const TalkRoom = () => {
             content: SYSTEM_PROMPT,
         },
     ])
+
+    const {
+        startRecording,
+        stopRecording,
+        togglePauseResume,
+        recordingBlob,
+        isRecording,
+        isPaused,
+        recordingTime,
+        mediaRecorder,
+    } = useAudioRecorder()
 
     const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -529,28 +528,30 @@ const TalkRoom = () => {
     }, [navigate])
     */
 
-    const toggleMicrophone = useCallback(async () => {
-        if (microphone && userMedia) {
-            userMedia.getTracks().forEach((track) => track.stop())
-            microphone.stop()
+    useEffect(() => {
+        if (endOfMessagesRef.current) {
+            endOfMessagesRef.current.scrollIntoView({ behavior: 'smooth' })
+        }
+    }, [messages])
 
-            setUserMedia(null)
-            setMicrophone(null)
-
-            console.log('voice message: ', speechChunkRef.current)
-            if (speechChunkRef.current) {
+    useEffect(() => {
+        if (!recordingBlob) return
+        console.log('transcripting audio')
+        transcriptAudio(recordingBlob).then(async (result) => {
+            if (result) {
+                console.log('transcription: ', result)
                 let _messages = [
                     ...messages,
                     {
                         role: ROLE.USER,
-                        content: speechChunkRef.current,
+                        content: result,
                     },
                 ]
                 setMessages((prev) => [
                     ...prev,
                     {
                         role: ROLE.USER,
-                        content: speechChunkRef.current,
+                        content: result,
                     },
                 ])
                 const openAIResponse = await getOpenAIChatCompletion(_messages)
@@ -563,91 +564,12 @@ const TalkRoom = () => {
                 ])
                 processTalk(openAIResponse)
             }
-        } else {
-            speechChunkRef.current = ''
-            const userMedia = await navigator.mediaDevices.getUserMedia({
-                audio: true,
-            })
-
-            const microphone = new MediaRecorder(userMedia)
-            microphone.start()
-
-            microphone.onstart = () => {
-                setMicOpen(true)
-            }
-
-            microphone.onstop = () => {
-                setMicOpen(false)
-            }
-
-            microphone.ondataavailable = (e) => {
-                if (e.data.size > 0) connection?.send(e.data)
-            }
-
-            setUserMedia(userMedia)
-            setMicrophone(microphone)
-        }
-    }, [connection, microphone, userMedia])
-
-    const setupDeepgram = useCallback(() => {
-        console.log('connecting to deepgram')
-        const deepgram = createClient(DEEPGRAM_API_KEY)
-        const deepgramLive = deepgram.listen.live({
-            model: 'nova',
-            interim_results: true,
-            smart_format: true,
         })
-
-        deepgramLive.on(LiveTranscriptionEvents.Open, () => {
-            console.log('connection established')
-            setListening(true)
-            setInterval(() => deepgramLive.keepAlive(), 3000)
-        })
-
-        deepgramLive.on(LiveTranscriptionEvents.Close, (e) => {
-            console.log(`connection closed: ${Object.keys(e)}`)
-            setListening(false)
-            setConnection(null)
-        })
-
-        deepgramLive.on(LiveTranscriptionEvents.Transcript, (data) => {
-            const words = data.channel.alternatives[0].words
-            const caption = words
-                .map((word: any) => word.punctuated_word ?? word.word)
-                .join(' ')
-            console.log('caption: ', caption)
-            if (caption !== '') {
-                speechChunkRef.current += caption
-            }
-        })
-
-        setConnection(deepgramLive)
-        // setLoading(false);
-    }, [connection])
-
-    // useEffect(() => {
-    //     if (!connection) return
-    //     const intervalId = setInterval(() => connection.keepAlive(), 3000)
-    //     return () => clearInterval(intervalId)
-    // }, [connection])
-
-    useEffect(() => {
-        if (endOfMessagesRef.current) {
-            endOfMessagesRef.current.scrollIntoView({ behavior: 'smooth' })
-        }
-    }, [messages])
-
-    useEffect(() => {
-        if (connection) return
-        setupDeepgram()
-    }, [])
+    }, [recordingBlob])
 
     return (
         <div className="h-[calc(100vh-55px)] bg-publicDashboardBg relative">
             <div className="absolute flex flex-col gap-1 p-2 rounded-md top-2 left-2 bg-gray-500/30 z-[5] backdrop-blur-md">
-                <div>
-                    Deepgram: {isListening ? 'Connected' : 'Disconnected'}
-                </div>
                 <div>D-ID: {isPlaying ? 'Connected' : 'Disconnected'}</div>
             </div>
             <video
@@ -809,11 +731,11 @@ const TalkRoom = () => {
             >
                 <IconButton
                     className={`rounded-full w-8 h-8 md:w-10 md:h-10 ${
-                        !!userMedia && !!microphone && micOpen
-                            ? 'bg-[#A8184C]'
-                            : 'bg-white/10'
+                        isRecording ? 'bg-[#A8184C]' : 'bg-white/10'
                     } hover:brightness-125`}
-                    onClick={() => toggleMicrophone()}
+                    onClick={() => {
+                        isRecording ? stopRecording() : startRecording()
+                    }}
                 >
                     <MicrophoneIcon
                         color="white"

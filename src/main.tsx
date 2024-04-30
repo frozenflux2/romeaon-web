@@ -8,10 +8,8 @@ import App from './App'
 import './App.css'
 
 createRoot(document.getElementById('root') as HTMLElement).render(
-    <React.StrictMode>
-        <ThemeProvider>
-            <Toaster />
-            <App />
-        </ThemeProvider>
-    </React.StrictMode>
+    <ThemeProvider>
+        <App />
+        <Toaster />
+    </ThemeProvider>
 )
